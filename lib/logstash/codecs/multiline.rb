@@ -1,3 +1,4 @@
+# EDITED AS PER https://logstash.jira.com/browse/LOGSTASH-2207
 # encoding: utf-8
 require "logstash/codecs/base"
 require "logstash/util/charset"
@@ -138,7 +139,8 @@ class LogStash::Codecs::Multiline < LogStash::Codecs::Base
     @grok.compile(@pattern)
     @logger.debug("Registered multiline plugin", :type => @type, :config => @config)
 
-    @buffer = []
+    @buffer = {}
+    @semaphore = Mutex.new
     @handler = method("do_#{@what}".to_sym)
 
     @converter = LogStash::Util::Charset.new(@charset)
@@ -146,42 +148,49 @@ class LogStash::Codecs::Multiline < LogStash::Codecs::Base
   end # def register
 
   public
-  def decode(text, &block)
+  def decode(text, stream_identity, &block)
     text = @converter.convert(text)
-
     match = @grok.match(text)
     @logger.debug("Multiline", :pattern => @pattern, :text => text,
                   :match => !match.nil?, :negate => @negate)
 
     # Add negate option
     match = (match and !@negate) || (!match and @negate)
-    @handler.call(text, match, &block)
+    @semaphore.synchronize do
+        #puts Thread.current.object_id
+   	@handler.call(text, match, stream_identity, &block)
+    end
   end # def decode
 
-  def buffer(text)
-    @time = Time.now.utc if @buffer.empty?
-    @buffer << text
+  def buffer(text, stream_identity)
+     #puts "About to buffer: " + stream_identity
+     @buffer[stream_identity] = [] if !@buffer.key?(stream_identity)
+     @time = Time.now.utc if @buffer[stream_identity].empty?
+     @buffer[stream_identity] << text
+     #puts "Buffering : " + text.to_s
   end
 
-  def flush(&block)
-    if @buffer.any?
-      event = LogStash::Event.new("@timestamp" => @time, "message" => @buffer.join("\n"))
+  def flush(stream_identity, &block)
+     if @buffer.key?(stream_identity) && @buffer[stream_identity].any?
+       #puts "I have an event"
+      msg2write =  @buffer[stream_identity].join("\n") 
+      event = LogStash::Event.new("@timestamp" => @time, "message" => msg2write)
       # Tag multiline events
-      event.tag @multiline_tag if @multiline_tag && @buffer.size > 1
+      event.tag @multiline_tag if @multiline_tag && @buffer[stream_identity].size > 1
 
       yield event
-      @buffer = []
+      @buffer.delete(stream_identity)
     end
   end
 
-  def do_next(text, matched, &block)
-    buffer(text)
-    flush(&block) if !matched
+  def do_next(text, matched, stream_identity, &block)
+    buffer(text, stream_identity)
+    flush(stream_identity, &block) if !matched
   end
 
-  def do_previous(text, matched, &block)
-    flush(&block) if !matched
-    buffer(text)
+  def do_previous(text, matched, stream_identity, &block)
+    flush(stream_identity, &block) if !matched
+    buffer(text, stream_identity)
   end
 
   public

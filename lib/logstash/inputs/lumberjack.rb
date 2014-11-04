@@ -44,7 +44,9 @@ class LogStash::Inputs::Lumberjack < LogStash::Inputs::Base
   public
   def run(output_queue)
     @lumberjack.run do |l|
-      @codec.decode(l.delete("line")) do |event|
+      stream_id = l["host"]+":"+ l["file"]
+      #puts stream_id
+      @codec.decode(l.delete("line"), stream_id) do |event|
         decorate(event)
         l.each { |k,v| event[k] = v; v.force_encoding(Encoding::UTF_8) }
         output_queue << event
